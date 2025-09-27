@@ -1,0 +1,146 @@
+// SPDX-License-Identifier: MIT
+pragma language_version >= 0.16.0;
+
+/**
+ * @module PrivateHealthTypes
+ * @description Shared types and structures for the PrivateHealth ecosystem
+ */
+module PrivateHealthTypes {
+  import CompactStandardLibrary;
+
+  /**
+   * @description Health data categories that can be shared
+   */
+  enum HealthDataCategory {
+    Medical_Records,
+    Lab_Results,
+    Genomic_Data,
+    Lifestyle_Data,
+    Mental_Health,
+    Medication_History,
+    Imaging_Data,
+    Vital_Signs
+  }
+
+  /**
+   * @description Consent levels for data sharing
+   */
+  enum ConsentLevel {
+    None,
+    Restricted,
+    Research_Only,
+    Commercial_Use,
+    Full_Access
+  }
+
+  /**
+   * @description Research proposal status
+   */
+  enum ProposalStatus {
+    Submitted,
+    Under_Review,
+    Approved,
+    Rejected,
+    Active,
+    Completed,
+    Cancelled
+  }
+
+  /**
+   * @description Medical credential types
+   */
+  enum CredentialType {
+    Medical_Degree,
+    Board_Certification,
+    Research_License,
+    Institution_Affiliation,
+    Ethics_Approval
+  }
+
+  /**
+   * @description Patient profile with encrypted health data
+   */
+  struct PatientProfile {
+    patientId: Uint<128>,
+    encryptedProfile: Opaque<"string">,
+    dataCategories: Vector<8, HealthDataCategory>,
+    consentLevels: Vector<8, ConsentLevel>,
+    zkCommitment: Uint<128>,
+    lastUpdated: Uint<64>,
+    isActive: Boolean
+  }
+
+  /**
+   * @description Research proposal structure
+   */
+  struct ResearchProposal {
+    proposalId: Uint<128>,
+    researcher: Either<ZswapCoinPublicKey, ContractAddress>,
+    title: Opaque<"string">,
+    description: Opaque<"string">,
+    requiredDataTypes: Vector<8, HealthDataCategory>,
+    minParticipants: Uint<32>,
+    maxParticipants: Uint<32>,
+    rewardPerParticipant: Uint<128>,
+    duration: Uint<64>,
+    status: ProposalStatus,
+    ethicsApprovalHash: Uint<128>,
+    createdAt: Uint<64>
+  }
+
+  /**
+   * @description Data sharing agreement
+   */
+  struct DataSharingAgreement {
+    agreementId: Uint<128>,
+    patientId: Uint<128>,
+    proposalId: Uint<128>,
+    researcher: Either<ZswapCoinPublicKey, ContractAddress>,
+    dataTypes: Vector<8, HealthDataCategory>,
+    compensationAmount: Uint<128>,
+    accessDuration: Uint<64>,
+    zkProofHash: Uint<128>,
+    isActive: Boolean,
+    createdAt: Uint<64>,
+    expiresAt: Uint<64>
+  }
+
+  /**
+   * @description Medical credential verification
+   */
+  struct MedicalCredential {
+    credentialId: Uint<128>,
+    holder: Either<ZswapCoinPublicKey, ContractAddress>,
+    credentialType: CredentialType,
+    issuer: Opaque<"string">,
+    zkProofHash: Uint<128>,
+    issuedAt: Uint<64>,
+    expiresAt: Uint<64>,
+    isValid: Boolean
+  }
+
+  /**
+   * @description Data access record for audit trail
+   */
+  struct DataAccessRecord {
+    recordId: Uint<128>,
+    patientId: Uint<128>,
+    accessor: Either<ZswapCoinPublicKey, ContractAddress>,
+    dataTypes: Vector<8, HealthDataCategory>,
+    accessedAt: Uint<64>,
+    purpose: Opaque<"string">,
+    zkProofHash: Uint<128>
+  }
+
+  /**
+   * @description Reward distribution record
+   */
+  struct RewardRecord {
+    recordId: Uint<128>,
+    recipient: Either<ZswapCoinPublicKey, ContractAddress>,
+    amount: Uint<128>,
+    proposalId: Uint<128>,
+    distributedAt: Uint<64>,
+    txHash: Uint<128>
+  }
+}

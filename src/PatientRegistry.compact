@@ -1,0 +1,427 @@
+// SPDX-License-Identifier: MIT
+pragma language_version >= 0.16.0;
+
+/**
+ * @module PatientRegistry
+ * @description Patient registration and health data management with privacy-preserving ZK proofs
+ */
+module PatientRegistry {
+  import CompactStandardLibrary;
+  import "../security/Initializable" prefix Initializable_;
+  import "../utils/Utils" prefix Utils_;
+  import "./types" prefix Types_;
+
+  /**
+   * @description Mapping from patient ID to patient profile
+   * @type {Map<Uint<128>, Types_PatientProfile>} _patients
+   */
+  export ledger _patients: Map<Uint<128>, Types_PatientProfile>;
+
+  /**
+   * @description Mapping from patient address to patient ID
+   * @type {Map<Either<ZswapCoinPublicKey, ContractAddress>, Uint<128>>} _addressToPatientId
+   */
+  export ledger _addressToPatientId: Map<Either<ZswapCoinPublicKey, ContractAddress>, Uint<128>>;
+
+  /**
+   * @description Mapping for data sharing permissions
+   * @type {Map<Uint<128>, Map<Either<ZswapCoinPublicKey, ContractAddress>, Vector<8, Types_ConsentLevel>>>} _sharingPermissions
+   */
+  export ledger _sharingPermissions: Map<Uint<128>, Map<Either<ZswapCoinPublicKey, ContractAddress>, Vector<8, Types_ConsentLevel>>>;
+
+  /**
+   * @description Mapping for data access audit trail
+   * @type {Map<Uint<128>, Vector<100, Types_DataAccessRecord>>} _accessHistory
+   */
+  export ledger _accessHistory: Map<Uint<128>, Vector<100, Types_DataAccessRecord>>;
+
+  /**
+   * @description Next available patient ID
+   * @type {Uint<128>} _nextPatientId
+   */
+  export ledger _nextPatientId: Uint<128>;
+
+  /**
+   * @description Contract administrator
+   * @type {Either<ZswapCoinPublicKey, ContractAddress>} _admin
+   */
+  export ledger _admin: Either<ZswapCoinPublicKey, ContractAddress>;
+
+  /**
+   * @description Initializes the PatientRegistry contract
+   *
+   * @circuitInfo k=10, rows=45
+   *
+   * Requirements:
+   * - Must be called in the contract's constructor
+   *
+   * @param {Either<ZswapCoinPublicKey, ContractAddress>} admin - The contract administrator
+   * @return {[]} - Empty tuple
+   */
+  export circuit initialize(admin: Either<ZswapCoinPublicKey, ContractAddress>): [] {
+    Initializable_initialize();
+    _admin = disclose(admin);
+    _nextPatientId = 1;
+  }
+
+  /**
+   * @description Register a new patient with encrypted health profile
+   *
+   * @circuitInfo k=12, rows=800
+   *
+   * Requirements:
+   * - Contract is initialized
+   * - Caller must not already be registered
+   * - Encrypted profile must not be empty
+   *
+   * @param {Opaque<"string">} encryptedProfile - Encrypted patient health profile
+   * @param {Vector<8, Types_HealthDataCategory>} dataCategories - Available health data categories
+   * @param {Vector<8, Types_ConsentLevel>} initialConsent - Initial consent levels for each category
+   * @param {Uint<128>} zkCommitment - Zero-knowledge commitment for data integrity
+   * @return {Uint<128>} - The assigned patient ID
+   */
+  export circuit registerPatient(
+    encryptedProfile: Opaque<"string">,
+    dataCategories: Vector<8, Types_HealthDataCategory>,
+    initialConsent: Vector<8, Types_ConsentLevel>,
+    zkCommitment: Uint<128>
+  ): Uint<128> {
+    Initializable_assertInitialized();
+
+    const caller = left<ZswapCoinPublicKey, ContractAddress>(ownPublicKey());
+
+    // Check if patient is already registered
+    assert(!_addressToPatientId.member(disclose(caller)), "PatientRegistry: already registered");
+
+    // Validate input
+    assert(encryptedProfile != "", "PatientRegistry: empty profile");
+    assert(zkCommitment > 0, "PatientRegistry: invalid commitment");
+
+    const patientId = _nextPatientId;
+    const currentTime = 1000000; // TODO: Replace with actual timestamp when available
+
+    // Create patient profile
+    const profile = Types_PatientProfile {
+      patientId: patientId,
+      encryptedProfile: disclose(encryptedProfile),
+      dataCategories: dataCategories,
+      consentLevels: initialConsent,
+      zkCommitment: zkCommitment,
+      lastUpdated: currentTime,
+      isActive: true
+    };
+
+    // Store patient data
+    _patients.insert(disclose(patientId), disclose(profile));
+    _addressToPatientId.insert(disclose(caller), disclose(patientId));
+
+    // Initialize empty access history
+    _accessHistory.insert(disclose(patientId), default<Vector<100, Types_DataAccessRecord>>);
+
+    // Initialize empty sharing permissions
+    _sharingPermissions.insert(disclose(patientId), default<Map<Either<ZswapCoinPublicKey, ContractAddress>, Vector<8, Types_ConsentLevel>>>);
+
+    // Increment next patient ID
+    _nextPatientId = _nextPatientId + 1;
+
+    return patientId;
+  }
+
+  /**
+   * @description Update patient consent levels for data sharing
+   *
+   * @circuitInfo k=11, rows=600
+   *
+   * Requirements:
+   * - Contract is initialized
+   * - Caller must be registered patient
+   * - New ZK commitment must be valid
+   *
+   * @param {Vector<8, Types_ConsentLevel>} newConsentLevels - Updated consent levels
+   * @param {Uint<128>} newZkCommitment - New zero-knowledge commitment
+   * @return {[]} - Empty tuple
+   */
+  export circuit updateConsent(
+    newConsentLevels: Vector<8, Types_ConsentLevel>,
+    newZkCommitment: Uint<128>
+  ): [] {
+    Initializable_assertInitialized();
+
+    const caller = left<ZswapCoinPublicKey, ContractAddress>(ownPublicKey());
+
+    // Verify patient is registered
+    assert(_addressToPatientId.member(disclose(caller)), "PatientRegistry: not registered");
+
+    const patientId = _addressToPatientId.lookup(caller);
+    assert(_patients.member(disclose(patientId)), "PatientRegistry: patient not found");
+
+    // Validate new commitment
+    assert(newZkCommitment > 0, "PatientRegistry: invalid commitment");
+
+    const currentTime = 1000000; // TODO: Replace with actual timestamp when available
+    const existingProfile = _patients.lookup(patientId);
+
+    // Update patient profile
+    const updatedProfile = Types_PatientProfile {
+      patientId: existingProfile.patientId,
+      encryptedProfile: existingProfile.encryptedProfile,
+      dataCategories: existingProfile.dataCategories,
+      consentLevels: newConsentLevels,
+      zkCommitment: newZkCommitment,
+      lastUpdated: currentTime,
+      isActive: existingProfile.isActive
+    };
+
+    _patients.insert(disclose(patientId), disclose(updatedProfile));
+  }
+
+  /**
+   * @description Grant specific data access permissions to a researcher
+   *
+   * @circuitInfo k=11, rows=500
+   *
+   * Requirements:
+   * - Contract is initialized
+   * - Caller must be registered patient
+   * - Researcher address must not be zero
+   *
+   * @param {Either<ZswapCoinPublicKey, ContractAddress>} researcher - The researcher address
+   * @param {Vector<8, Types_ConsentLevel>} permissions - Consent levels for each data category
+   * @return {[]} - Empty tuple
+   */
+  export circuit grantPermissions(
+    researcher: Either<ZswapCoinPublicKey, ContractAddress>,
+    permissions: Vector<8, Types_ConsentLevel>
+  ): [] {
+    Initializable_assertInitialized();
+
+    const caller = left<ZswapCoinPublicKey, ContractAddress>(ownPublicKey());
+
+    // Verify patient is registered
+    assert(_addressToPatientId.member(disclose(caller)), "PatientRegistry: not registered");
+    assert(!Utils_isKeyOrAddressZero(researcher), "PatientRegistry: invalid researcher");
+
+    const patientId = _addressToPatientId.lookup(caller);
+
+    // Initialize permissions map if not exists
+    if (!_sharingPermissions.member(disclose(patientId))) {
+      _sharingPermissions.insert(disclose(patientId), default<Map<Either<ZswapCoinPublicKey, ContractAddress>, Vector<8, Types_ConsentLevel>>>);
+    }
+
+    // Grant permissions
+    _sharingPermissions.lookup(patientId).insert(disclose(researcher), disclose(permissions));
+  }
+
+  /**
+   * @description Revoke data access permissions from a researcher
+   *
+   * @circuitInfo k=10, rows=400
+   *
+   * Requirements:
+   * - Contract is initialized
+   * - Caller must be registered patient
+   *
+   * @param {Either<ZswapCoinPublicKey, ContractAddress>} researcher - The researcher address
+   * @return {[]} - Empty tuple
+   */
+  export circuit revokePermissions(
+    researcher: Either<ZswapCoinPublicKey, ContractAddress>
+  ): [] {
+    Initializable_assertInitialized();
+
+    const caller = left<ZswapCoinPublicKey, ContractAddress>(ownPublicKey());
+
+    // Verify patient is registered
+    assert(_addressToPatientId.member(disclose(caller)), "PatientRegistry: not registered");
+
+    const patientId = _addressToPatientId.lookup(caller);
+
+    if (_sharingPermissions.member(disclose(patientId))) {
+      if (_sharingPermissions.lookup(patientId).member(disclose(researcher))) {
+        // Create empty permissions vector (all None)
+        const emptyPermissions = Vector<8, Types_ConsentLevel>([Types_ConsentLevel.None; 8]);
+        _sharingPermissions.lookup(patientId).insert(disclose(researcher), disclose(emptyPermissions));
+      }
+    }
+  }
+
+  /**
+   * @description Record data access for audit trail
+   *
+   * @circuitInfo k=11, rows=700
+   *
+   * Requirements:
+   * - Contract is initialized
+   * - Patient must exist
+   * - Access must be authorized
+   *
+   * @param {Uint<128>} patientId - The patient ID
+   * @param {Either<ZswapCoinPublicKey, ContractAddress>} accessor - The data accessor
+   * @param {Vector<8, Types_HealthDataCategory>} dataTypes - Accessed data types
+   * @param {Opaque<"string">} purpose - Access purpose
+   * @param {Uint<128>} zkProofHash - Zero-knowledge proof hash
+   * @return {[]} - Empty tuple
+   */
+  export circuit recordDataAccess(
+    patientId: Uint<128>,
+    accessor: Either<ZswapCoinPublicKey, ContractAddress>,
+    dataTypes: Vector<8, Types_HealthDataCategory>,
+    purpose: Opaque<"string">,
+    zkProofHash: Uint<128>
+  ): [] {
+    Initializable_assertInitialized();
+
+    // Verify patient exists
+    assert(_patients.member(disclose(patientId)), "PatientRegistry: patient not found");
+
+    // Verify access is authorized (simplified check)
+    assert(_sharingPermissions.member(disclose(patientId)), "PatientRegistry: no permissions");
+    assert(_sharingPermissions.lookup(patientId).member(disclose(accessor)), "PatientRegistry: unauthorized access");
+
+    const currentTime = 1000000; // TODO: Replace with actual timestamp when available
+    const recordId = patientId * 1000000 + currentTime; // Simple ID generation
+
+    // Create access record
+    const accessRecord = Types_DataAccessRecord {
+      recordId: recordId,
+      patientId: patientId,
+      accessor: accessor,
+      dataTypes: dataTypes,
+      accessedAt: currentTime,
+      purpose: disclose(purpose),
+      zkProofHash: zkProofHash
+    };
+
+    // Add to access history (simplified - would need proper vector management)
+    if (!_accessHistory.member(disclose(patientId))) {
+      _accessHistory.insert(disclose(patientId), default<Vector<100, Types_DataAccessRecord>>);
+    }
+
+    // Note: In a real implementation, we'd need to manage the vector properly
+    // This is simplified for demonstration
+  }
+
+  /**
+   * @description Get patient profile (returns encrypted data)
+   *
+   * @circuitInfo k=10, rows=300
+   *
+   * Requirements:
+   * - Contract is initialized
+   * - Patient must exist
+   *
+   * @param {Uint<128>} patientId - The patient ID
+   * @return {Types_PatientProfile} - The patient profile
+   */
+  export circuit getPatientProfile(patientId: Uint<128>): Types_PatientProfile {
+    Initializable_assertInitialized();
+
+    assert(_patients.member(disclose(patientId)), "PatientRegistry: patient not found");
+
+    return _patients.lookup(patientId);
+  }
+
+  /**
+   * @description Check if caller has permission to access specific data type
+   *
+   * @circuitInfo k=10, rows=400
+   *
+   * Requirements:
+   * - Contract is initialized
+   * - Patient must exist
+   *
+   * @param {Uint<128>} patientId - The patient ID
+   * @param {Either<ZswapCoinPublicKey, ContractAddress>} accessor - The data accessor
+   * @param {Types_HealthDataCategory} dataType - The data category to check
+   * @return {Types_ConsentLevel} - The consent level for this data type
+   */
+  export circuit checkDataPermission(
+    patientId: Uint<128>,
+    accessor: Either<ZswapCoinPublicKey, ContractAddress>,
+    dataType: Types_HealthDataCategory
+  ): Types_ConsentLevel {
+    Initializable_assertInitialized();
+
+    assert(_patients.member(disclose(patientId)), "PatientRegistry: patient not found");
+
+    if (!_sharingPermissions.member(disclose(patientId))) {
+      return Types_ConsentLevel.None;
+    }
+
+    if (!_sharingPermissions.lookup(patientId).member(disclose(accessor))) {
+      return Types_ConsentLevel.None;
+    }
+
+    const permissions = _sharingPermissions.lookup(patientId).lookup(accessor);
+
+    // Convert enum to index (simplified)
+    const dataTypeIndex = match (dataType) {
+      case Types_HealthDataCategory.Medical_Records => 0,
+      case Types_HealthDataCategory.Lab_Results => 1,
+      case Types_HealthDataCategory.Genomic_Data => 2,
+      case Types_HealthDataCategory.Lifestyle_Data => 3,
+      case Types_HealthDataCategory.Mental_Health => 4,
+      case Types_HealthDataCategory.Medication_History => 5,
+      case Types_HealthDataCategory.Imaging_Data => 6,
+      case Types_HealthDataCategory.Vital_Signs => 7
+    };
+
+    return permissions[dataTypeIndex];
+  }
+
+  /**
+   * @description Get patient ID from address
+   *
+   * @circuitInfo k=10, rows=200
+   *
+   * Requirements:
+   * - Contract is initialized
+   *
+   * @param {Either<ZswapCoinPublicKey, ContractAddress>} patientAddress - The patient address
+   * @return {Uint<128>} - The patient ID (0 if not found)
+   */
+  export circuit getPatientId(patientAddress: Either<ZswapCoinPublicKey, ContractAddress>): Uint<128> {
+    Initializable_assertInitialized();
+
+    if (!_addressToPatientId.member(disclose(patientAddress))) {
+      return 0;
+    }
+
+    return _addressToPatientId.lookup(patientAddress);
+  }
+
+  /**
+   * @description Deactivate patient account (admin only)
+   *
+   * @circuitInfo k=10, rows=400
+   *
+   * Requirements:
+   * - Contract is initialized
+   * - Caller must be admin
+   * - Patient must exist
+   *
+   * @param {Uint<128>} patientId - The patient ID to deactivate
+   * @return {[]} - Empty tuple
+   */
+  export circuit deactivatePatient(patientId: Uint<128>): [] {
+    Initializable_assertInitialized();
+
+    const caller = left<ZswapCoinPublicKey, ContractAddress>(ownPublicKey());
+    assert(disclose(caller) == _admin, "PatientRegistry: admin only");
+
+    assert(_patients.member(disclose(patientId)), "PatientRegistry: patient not found");
+
+    const existingProfile = _patients.lookup(patientId);
+    const updatedProfile = Types_PatientProfile {
+      patientId: existingProfile.patientId,
+      encryptedProfile: existingProfile.encryptedProfile,
+      dataCategories: existingProfile.dataCategories,
+      consentLevels: existingProfile.consentLevels,
+      zkCommitment: existingProfile.zkCommitment,
+      lastUpdated: existingProfile.lastUpdated,
+      isActive: false
+    };
+
+    _patients.insert(disclose(patientId), disclose(updatedProfile));
+  }
+}

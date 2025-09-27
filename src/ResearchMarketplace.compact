@@ -1,0 +1,516 @@
+// SPDX-License-Identifier: MIT
+pragma language_version >= 0.16.0;
+
+/**
+ * @module ResearchMarketplace
+ * @description Research proposal submission, matching, and data access marketplace
+ */
+module ResearchMarketplace {
+  import CompactStandardLibrary;
+  import "../security/Initializable" prefix Initializable_;
+  import "../utils/Utils" prefix Utils_;
+  import "./types" prefix Types_;
+
+  /**
+   * @description Mapping from proposal ID to research proposal
+   * @type {Map<Uint<128>, Types_ResearchProposal>} _proposals
+   */
+  export ledger _proposals: Map<Uint<128>, Types_ResearchProposal>;
+
+  /**
+   * @description Mapping from researcher address to their proposals
+   * @type {Map<Either<ZswapCoinPublicKey, ContractAddress>, Vector<100, Uint<128>>>} _researcherProposals
+   */
+  export ledger _researcherProposals: Map<Either<ZswapCoinPublicKey, ContractAddress>, Vector<100, Uint<128>>>;
+
+  /**
+   * @description Mapping from proposal ID to data sharing agreements
+   * @type {Map<Uint<128>, Vector<1000, Types_DataSharingAgreement>>} _proposalAgreements
+   */
+  export ledger _proposalAgreements: Map<Uint<128>, Vector<1000, Types_DataSharingAgreement>>;
+
+  /**
+   * @description Mapping for proposal participant matching
+   * @type {Map<Uint<128>, Vector<1000, Uint<128>>>} _proposalParticipants
+   */
+  export ledger _proposalParticipants: Map<Uint<128>, Vector<1000, Uint<128>>>;
+
+  /**
+   * @description Mapping for proposal funding/escrow
+   * @type {Map<Uint<128>, Uint<128>>} _proposalFunding
+   */
+  export ledger _proposalFunding: Map<Uint<128>, Uint<128>>;
+
+  /**
+   * @description Mapping for reward distribution tracking
+   * @type {Map<Uint<128>, Vector<1000, Types_RewardRecord>>} _rewardDistributions
+   */
+  export ledger _rewardDistributions: Map<Uint<128>, Vector<1000, Types_RewardRecord>>;
+
+  /**
+   * @description Next available proposal ID
+   * @type {Uint<128>} _nextProposalId
+   */
+  export ledger _nextProposalId: Uint<128>;
+
+  /**
+   * @description Contract administrator
+   * @type {Either<ZswapCoinPublicKey, ContractAddress>} _admin
+   */
+  export ledger _admin: Either<ZswapCoinPublicKey, ContractAddress>;
+
+  /**
+   * @description Patient Registry contract address for validation
+   * @type {ContractAddress} _patientRegistry
+   */
+  export ledger _patientRegistry: ContractAddress;
+
+  /**
+   * @description Data Verification contract address
+   * @type {ContractAddress} _dataVerification
+   */
+  export ledger _dataVerification: ContractAddress;
+
+  /**
+   * @description Minimum proposal duration (in seconds)
+   * @type {Uint<64>} _minProposalDuration
+   */
+  export ledger _minProposalDuration: Uint<64>;
+
+  /**
+   * @description Maximum proposal duration (in seconds)
+   * @type {Uint<64>} _maxProposalDuration
+   */
+  export ledger _maxProposalDuration: Uint<64>;
+
+  /**
+   * @description Initializes the ResearchMarketplace contract
+   *
+   * @circuitInfo k=10, rows=80
+   *
+   * Requirements:
+   * - Must be called in the contract's constructor
+   *
+   * @param {Either<ZswapCoinPublicKey, ContractAddress>} admin - The contract administrator
+   * @param {ContractAddress} patientRegistry - Patient Registry contract address
+   * @param {ContractAddress} dataVerification - Data Verification contract address
+   * @return {[]} - Empty tuple
+   */
+  export circuit initialize(
+    admin: Either<ZswapCoinPublicKey, ContractAddress>,
+    patientRegistry: ContractAddress,
+    dataVerification: ContractAddress
+  ): [] {
+    Initializable_initialize();
+    _admin = disclose(admin);
+    _patientRegistry = disclose(patientRegistry);
+    _dataVerification = disclose(dataVerification);
+    _nextProposalId = 1;
+    _minProposalDuration = 2592000; // 30 days in seconds
+    _maxProposalDuration = 31536000; // 1 year in seconds
+  }
+
+  /**
+   * @description Submit a new research proposal
+   *
+   * @circuitInfo k=12, rows=900
+   *
+   * Requirements:
+   * - Contract is initialized
+   * - Title and description must not be empty
+   * - Valid participant counts and duration
+   * - Sufficient funding provided
+   *
+   * @param {Opaque<"string">} title - Research proposal title
+   * @param {Opaque<"string">} description - Detailed research description
+   * @param {Vector<8, Types_HealthDataCategory>} requiredDataTypes - Required health data categories
+   * @param {Uint<32>} minParticipants - Minimum number of participants needed
+   * @param {Uint<32>} maxParticipants - Maximum number of participants
+   * @param {Uint<128>} rewardPerParticipant - DUST reward per participant
+   * @param {Uint<64>} duration - Study duration in seconds
+   * @param {Uint<128>} ethicsApprovalHash - Hash of ethics approval document
+   * @return {Uint<128>} - The assigned proposal ID
+   */
+  export circuit submitProposal(
+    title: Opaque<"string">,
+    description: Opaque<"string">,
+    requiredDataTypes: Vector<8, Types_HealthDataCategory>,
+    minParticipants: Uint<32>,
+    maxParticipants: Uint<32>,
+    rewardPerParticipant: Uint<128>,
+    duration: Uint<64>,
+    ethicsApprovalHash: Uint<128>
+  ): Uint<128> {
+    Initializable_assertInitialized();
+
+    const caller = left<ZswapCoinPublicKey, ContractAddress>(ownPublicKey());
+
+    // Validate inputs
+    assert(title != "", "ResearchMarketplace: empty title");
+    assert(description != "", "ResearchMarketplace: empty description");
+    assert(minParticipants > 0, "ResearchMarketplace: invalid min participants");
+    assert(maxParticipants >= minParticipants, "ResearchMarketplace: invalid max participants");
+    assert(rewardPerParticipant > 0, "ResearchMarketplace: invalid reward");
+    assert(duration >= _minProposalDuration && duration <= _maxProposalDuration, "ResearchMarketplace: invalid duration");
+    assert(ethicsApprovalHash > 0, "ResearchMarketplace: invalid ethics approval");
+
+    const proposalId = _nextProposalId;
+    const currentTime = 1000000; // TODO: Replace with actual timestamp when available
+
+    // Calculate total funding needed
+    const totalFunding = rewardPerParticipant * (maxParticipants as Uint<128>);
+
+    // Create research proposal
+    const proposal = Types_ResearchProposal {
+      proposalId: proposalId,
+      researcher: caller,
+      title: disclose(title),
+      description: disclose(description),
+      requiredDataTypes: requiredDataTypes,
+      minParticipants: minParticipants,
+      maxParticipants: maxParticipants,
+      rewardPerParticipant: rewardPerParticipant,
+      duration: duration,
+      status: Types_ProposalStatus.Submitted,
+      ethicsApprovalHash: ethicsApprovalHash,
+      createdAt: currentTime
+    };
+
+    // Store proposal
+    _proposals.insert(disclose(proposalId), disclose(proposal));
+
+    // Initialize proposal funding (would integrate with DUST token contract)
+    _proposalFunding.insert(disclose(proposalId), disclose(totalFunding));
+
+    // Initialize empty participants and agreements
+    _proposalParticipants.insert(disclose(proposalId), default<Vector<1000, Uint<128>>>);
+    _proposalAgreements.insert(disclose(proposalId), default<Vector<1000, Types_DataSharingAgreement>>);
+
+    // Track researcher's proposals
+    if (!_researcherProposals.member(disclose(caller))) {
+      _researcherProposals.insert(disclose(caller), default<Vector<100, Uint<128>>>);
+    }
+
+    // Add to researcher's proposal list (simplified vector management)
+    // In real implementation, would need proper vector management
+
+    // Increment next proposal ID
+    _nextProposalId = _nextProposalId + 1;
+
+    return proposalId;
+  }
+
+  /**
+   * @description Update proposal status (admin only)
+   *
+   * @circuitInfo k=10, rows=400
+   *
+   * Requirements:
+   * - Contract is initialized
+   * - Caller must be admin
+   * - Proposal must exist
+   *
+   * @param {Uint<128>} proposalId - The proposal ID
+   * @param {Types_ProposalStatus} newStatus - New proposal status
+   * @return {[]} - Empty tuple
+   */
+  export circuit updateProposalStatus(proposalId: Uint<128>, newStatus: Types_ProposalStatus): [] {
+    Initializable_assertInitialized();
+
+    const caller = left<ZswapCoinPublicKey, ContractAddress>(ownPublicKey());
+    assert(disclose(caller) == _admin, "ResearchMarketplace: admin only");
+
+    assert(_proposals.member(disclose(proposalId)), "ResearchMarketplace: proposal not found");
+
+    const existingProposal = _proposals.lookup(proposalId);
+    const updatedProposal = Types_ResearchProposal {
+      proposalId: existingProposal.proposalId,
+      researcher: existingProposal.researcher,
+      title: existingProposal.title,
+      description: existingProposal.description,
+      requiredDataTypes: existingProposal.requiredDataTypes,
+      minParticipants: existingProposal.minParticipants,
+      maxParticipants: existingProposal.maxParticipants,
+      rewardPerParticipant: existingProposal.rewardPerParticipant,
+      duration: existingProposal.duration,
+      status: newStatus,
+      ethicsApprovalHash: existingProposal.ethicsApprovalHash,
+      createdAt: existingProposal.createdAt
+    };
+
+    _proposals.insert(disclose(proposalId), disclose(updatedProposal));
+  }
+
+  /**
+   * @description Patient joins a research study
+   *
+   * @circuitInfo k=12, rows=1000
+   *
+   * Requirements:
+   * - Contract is initialized
+   * - Proposal must be approved and active
+   * - Patient must not already be participating
+   * - Patient must have required data types
+   * - Study must not be full
+   *
+   * @param {Uint<128>} proposalId - The proposal ID to join
+   * @param {Uint<128>} patientId - The patient ID
+   * @param {Vector<8, Types_HealthDataCategory>} sharedDataTypes - Data types patient agrees to share
+   * @param {Uint<128>} zkProofHash - Zero-knowledge proof of data possession
+   * @return {Uint<128>} - The agreement ID
+   */
+  export circuit joinStudy(
+    proposalId: Uint<128>,
+    patientId: Uint<128>,
+    sharedDataTypes: Vector<8, Types_HealthDataCategory>,
+    zkProofHash: Uint<128>
+  ): Uint<128> {
+    Initializable_assertInitialized();
+
+    const caller = left<ZswapCoinPublicKey, ContractAddress>(ownPublicKey());
+
+    // Verify proposal exists and is approved
+    assert(_proposals.member(disclose(proposalId)), "ResearchMarketplace: proposal not found");
+    const proposal = _proposals.lookup(proposalId);
+    assert(proposal.status == Types_ProposalStatus.Approved, "ResearchMarketplace: proposal not approved");
+
+    // Verify patient authorization (simplified - would call PatientRegistry)
+    // In real implementation: verify caller owns patientId via PatientRegistry
+
+    // Check if study is full
+    // In real implementation: count current participants in vector
+
+    // Verify patient has required data types (simplified)
+    assert(zkProofHash > 0, "ResearchMarketplace: invalid proof");
+
+    const currentTime = 1000000; // TODO: Replace with actual timestamp when available
+    const agreementId = proposalId * 1000000 + currentTime; // Simple ID generation
+
+    // Create data sharing agreement
+    const agreement = Types_DataSharingAgreement {
+      agreementId: agreementId,
+      patientId: patientId,
+      proposalId: proposalId,
+      researcher: proposal.researcher,
+      dataTypes: sharedDataTypes,
+      compensationAmount: proposal.rewardPerParticipant,
+      accessDuration: proposal.duration,
+      zkProofHash: zkProofHash,
+      isActive: true,
+      createdAt: currentTime,
+      expiresAt: currentTime + proposal.duration
+    };
+
+    // Store agreement (simplified vector management)
+    if (!_proposalAgreements.member(disclose(proposalId))) {
+      _proposalAgreements.insert(disclose(proposalId), default<Vector<1000, Types_DataSharingAgreement>>);
+    }
+
+    // Add patient to participants
+    if (!_proposalParticipants.member(disclose(proposalId))) {
+      _proposalParticipants.insert(disclose(proposalId), default<Vector<1000, Uint<128>>>);
+    }
+
+    return agreementId;
+  }
+
+  /**
+   * @description Request data access for approved research
+   *
+   * @circuitInfo k=11, rows=800
+   *
+   * Requirements:
+   * - Contract is initialized
+   * - Caller must be the proposal researcher
+   * - Agreement must be active
+   * - Access must be within agreement terms
+   *
+   * @param {Uint<128>} agreementId - The data sharing agreement ID
+   * @param {Vector<8, Types_HealthDataCategory>} requestedDataTypes - Specific data types to access
+   * @param {Opaque<"string">} accessPurpose - Purpose of data access
+   * @return {Boolean} - Success status
+   */
+  export circuit requestDataAccess(
+    agreementId: Uint<128>,
+    requestedDataTypes: Vector<8, Types_HealthDataCategory>,
+    accessPurpose: Opaque<"string">
+  ): Boolean {
+    Initializable_assertInitialized();
+
+    const caller = left<ZswapCoinPublicKey, ContractAddress>(ownPublicKey());
+
+    // Find the agreement (simplified search)
+    // In real implementation: maintain agreement ID mapping for efficient lookup
+    assert(accessPurpose != "", "ResearchMarketplace: empty purpose");
+
+    // Verify agreement exists and is active
+    // Verify caller is authorized researcher
+    // Verify requested data types are within agreement scope
+    // Record data access in PatientRegistry
+
+    // For now, return success (simplified)
+    return true;
+  }
+
+  /**
+   * @description Distribute rewards to participants
+   *
+   * @circuitInfo k=11, rows=700
+   *
+   * Requirements:
+   * - Contract is initialized
+   * - Caller must be admin or proposal researcher
+   * - Proposal must be completed
+   * - Sufficient funding available
+   *
+   * @param {Uint<128>} proposalId - The proposal ID
+   * @return {[]} - Empty tuple
+   */
+  export circuit distributeRewards(proposalId: Uint<128>): [] {
+    Initializable_assertInitialized();
+
+    const caller = left<ZswapCoinPublicKey, ContractAddress>(ownPublicKey());
+
+    // Verify proposal exists
+    assert(_proposals.member(disclose(proposalId)), "ResearchMarketplace: proposal not found");
+    const proposal = _proposals.lookup(proposalId);
+
+    // Verify authorization
+    assert(disclose(caller) == _admin || disclose(caller) == proposal.researcher, "ResearchMarketplace: unauthorized");
+
+    // Verify proposal is completed
+    assert(proposal.status == Types_ProposalStatus.Completed, "ResearchMarketplace: proposal not completed");
+
+    // Verify funding availability
+    assert(_proposalFunding.member(disclose(proposalId)), "ResearchMarketplace: no funding");
+
+    const currentTime = 1000000; // TODO: Replace with actual timestamp when available
+
+    // Distribute rewards to all participants (simplified)
+    // In real implementation: iterate through participants and transfer DUST tokens
+
+    // Initialize reward distribution tracking
+    if (!_rewardDistributions.member(disclose(proposalId))) {
+      _rewardDistributions.insert(disclose(proposalId), default<Vector<1000, Types_RewardRecord>>);
+    }
+
+    // Mark funding as used
+    _proposalFunding.insert(disclose(proposalId), 0);
+  }
+
+  /**
+   * @description Get research proposal details
+   *
+   * @circuitInfo k=10, rows=300
+   *
+   * Requirements:
+   * - Contract is initialized
+   * - Proposal must exist
+   *
+   * @param {Uint<128>} proposalId - The proposal ID
+   * @return {Types_ResearchProposal} - The research proposal
+   */
+  export circuit getProposal(proposalId: Uint<128>): Types_ResearchProposal {
+    Initializable_assertInitialized();
+
+    assert(_proposals.member(disclose(proposalId)), "ResearchMarketplace: proposal not found");
+
+    return _proposals.lookup(proposalId);
+  }
+
+  /**
+   * @description Get proposal participant count
+   *
+   * @circuitInfo k=10, rows=200
+   *
+   * Requirements:
+   * - Contract is initialized
+   * - Proposal must exist
+   *
+   * @param {Uint<128>} proposalId - The proposal ID
+   * @return {Uint<32>} - Number of participants
+   */
+  export circuit getParticipantCount(proposalId: Uint<128>): Uint<32> {
+    Initializable_assertInitialized();
+
+    assert(_proposals.member(disclose(proposalId)), "ResearchMarketplace: proposal not found");
+
+    if (!_proposalParticipants.member(disclose(proposalId))) {
+      return 0;
+    }
+
+    // In real implementation: count non-zero entries in participants vector
+    return 0; // Simplified
+  }
+
+  /**
+   * @description Cancel proposal (researcher only, if not started)
+   *
+   * @circuitInfo k=10, rows=400
+   *
+   * Requirements:
+   * - Contract is initialized
+   * - Caller must be proposal researcher
+   * - Proposal must not have started
+   *
+   * @param {Uint<128>} proposalId - The proposal ID
+   * @return {[]} - Empty tuple
+   */
+  export circuit cancelProposal(proposalId: Uint<128>): [] {
+    Initializable_assertInitialized();
+
+    const caller = left<ZswapCoinPublicKey, ContractAddress>(ownPublicKey());
+
+    assert(_proposals.member(disclose(proposalId)), "ResearchMarketplace: proposal not found");
+    const proposal = _proposals.lookup(proposalId);
+
+    // Verify caller is researcher
+    assert(disclose(caller) == proposal.researcher, "ResearchMarketplace: not researcher");
+
+    // Verify proposal can be cancelled
+    assert(proposal.status == Types_ProposalStatus.Submitted || proposal.status == Types_ProposalStatus.Under_Review,
+           "ResearchMarketplace: cannot cancel");
+
+    // Update status to cancelled
+    const updatedProposal = Types_ResearchProposal {
+      proposalId: proposal.proposalId,
+      researcher: proposal.researcher,
+      title: proposal.title,
+      description: proposal.description,
+      requiredDataTypes: proposal.requiredDataTypes,
+      minParticipants: proposal.minParticipants,
+      maxParticipants: proposal.maxParticipants,
+      rewardPerParticipant: proposal.rewardPerParticipant,
+      duration: proposal.duration,
+      status: Types_ProposalStatus.Cancelled,
+      ethicsApprovalHash: proposal.ethicsApprovalHash,
+      createdAt: proposal.createdAt
+    };
+
+    _proposals.insert(disclose(proposalId), disclose(updatedProposal));
+
+    // Refund funding (would integrate with DUST token contract)
+    _proposalFunding.insert(disclose(proposalId), 0);
+  }
+
+  /**
+   * @description Emergency stop (admin only)
+   *
+   * @circuitInfo k=10, rows=200
+   *
+   * Requirements:
+   * - Contract is initialized
+   * - Caller must be admin
+   *
+   * @return {[]} - Empty tuple
+   */
+  export circuit emergencyStop(): [] {
+    Initializable_assertInitialized();
+
+    const caller = left<ZswapCoinPublicKey, ContractAddress>(ownPublicKey());
+    assert(disclose(caller) == _admin, "ResearchMarketplace: admin only");
+
+    // In real implementation: pause all contract functions
+    // This is a simplified emergency stop
+  }
+}

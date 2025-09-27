@@ -1,0 +1,31 @@
+{
+  "name": "privatehealth-tests",
+  "version": "1.0.0",
+  "description": "Comprehensive test suite for PrivateHealth DApp",
+  "scripts": {
+    "test": "vitest",
+    "test:watch": "vitest --watch",
+    "test:ui": "vitest --ui",
+    "test:coverage": "vitest --coverage",
+    "test:unit": "vitest run tests/unit",
+    "test:integration": "vitest run tests/integration",
+    "test:e2e": "vitest run tests/e2e",
+    "test:contracts": "vitest run tests/unit/contracts",
+    "test:privacy": "vitest run tests/unit/privacy",
+    "test:frontend": "vitest run tests/unit/frontend"
+  },
+  "devDependencies": {
+    "@testing-library/jest-dom": "^6.1.4",
+    "@testing-library/react": "^13.4.0",
+    "@testing-library/user-event": "^14.5.1",
+    "@types/node": "^20.8.0",
+    "@vitest/coverage-v8": "^0.34.6",
+    "@vitest/ui": "^0.34.6",
+    "jsdom": "^22.1.0",
+    "vitest": "^0.34.6"
+  },
+  "dependencies": {
+    "@midnight-ntwrk/compact-runtime": "latest",
+    "@midnight-ntwrk/midnight-js-types": "latest"
+  }
+}

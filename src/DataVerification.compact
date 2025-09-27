@@ -1,0 +1,590 @@
+// SPDX-License-Identifier: MIT
+pragma language_version >= 0.16.0;
+
+/**
+ * @module DataVerification
+ * @description Zero-knowledge proof verification for medical credentials and data authenticity
+ */
+module DataVerification {
+  import CompactStandardLibrary;
+  import "../security/Initializable" prefix Initializable_;
+  import "../utils/Utils" prefix Utils_;
+  import "./types" prefix Types_;
+
+  /**
+   * @description Mapping from credential ID to medical credential
+   * @type {Map<Uint<128>, Types_MedicalCredential>} _credentials
+   */
+  export ledger _credentials: Map<Uint<128>, Types_MedicalCredential>;
+
+  /**
+   * @description Mapping from holder address to their credentials
+   * @type {Map<Either<ZswapCoinPublicKey, ContractAddress>, Vector<50, Uint<128>>>} _holderCredentials
+   */
+  export ledger _holderCredentials: Map<Either<ZswapCoinPublicKey, ContractAddress>, Vector<50, Uint<128>>>;
+
+  /**
+   * @description Mapping for ZK proof verification results
+   * @type {Map<Uint<128>, Boolean>} _verifiedProofs
+   */
+  export ledger _verifiedProofs: Map<Uint<128>, Boolean>;
+
+  /**
+   * @description Mapping for credential issuer whitelist
+   * @type {Map<Opaque<"string">, Boolean>} _authorizedIssuers
+   */
+  export ledger _authorizedIssuers: Map<Opaque<"string">, Boolean>;
+
+  /**
+   * @description Mapping for selective disclosure commitments
+   * @type {Map<Uint<128>, Map<Types_HealthDataCategory, Uint<128>>>} _dataCommitments
+   */
+  export ledger _dataCommitments: Map<Uint<128>, Map<Types_HealthDataCategory, Uint<128>>>;
+
+  /**
+   * @description Mapping for proof verification metadata
+   * @type {Map<Uint<128>, ProofMetadata>} _proofMetadata
+   */
+  export ledger _proofMetadata: Map<Uint<128>, ProofMetadata>;
+
+  /**
+   * @description Next available credential ID
+   * @type {Uint<128>} _nextCredentialId
+   */
+  export ledger _nextCredentialId: Uint<128>;
+
+  /**
+   * @description Contract administrator
+   * @type {Either<ZswapCoinPublicKey, ContractAddress>} _admin
+   */
+  export ledger _admin: Either<ZswapCoinPublicKey, ContractAddress>;
+
+  /**
+   * @description Verification requirement flags
+   * @type {Boolean} _requireCredentialVerification
+   */
+  export ledger _requireCredentialVerification: Boolean;
+
+  /**
+   * @description Proof metadata structure
+   */
+  struct ProofMetadata {
+    proofHash: Uint<128>,
+    verifier: Either<ZswapCoinPublicKey, ContractAddress>,
+    verifiedAt: Uint<64>,
+    expiresAt: Uint<64>,
+    isValid: Boolean
+  }
+
+  /**
+   * @description ZK proof verification parameters
+   */
+  struct ZKProofParams {
+    commitment: Uint<128>,
+    nullifier: Uint<128>,
+    publicInputs: Vector<10, Uint<128>>,
+    proof: Vector<8, Uint<128>>
+  }
+
+  /**
+   * @description Selective disclosure parameters
+   */
+  struct SelectiveDisclosureParams {
+    dataCategory: Types_HealthDataCategory,
+    commitment: Uint<128>,
+    nullifierHash: Uint<128>,
+    disclosedValue: Uint<128>,
+    proof: Vector<8, Uint<128>>
+  }
+
+  /**
+   * @description Initializes the DataVerification contract
+   *
+   * @circuitInfo k=10, rows=60
+   *
+   * Requirements:
+   * - Must be called in the contract's constructor
+   *
+   * @param {Either<ZswapCoinPublicKey, ContractAddress>} admin - The contract administrator
+   * @return {[]} - Empty tuple
+   */
+  export circuit initialize(admin: Either<ZswapCoinPublicKey, ContractAddress>): [] {
+    Initializable_initialize();
+    _admin = disclose(admin);
+    _nextCredentialId = 1;
+    _requireCredentialVerification = true;
+  }
+
+  /**
+   * @description Add authorized credential issuer (admin only)
+   *
+   * @circuitInfo k=10, rows=300
+   *
+   * Requirements:
+   * - Contract is initialized
+   * - Caller must be admin
+   * - Issuer name must not be empty
+   *
+   * @param {Opaque<"string">} issuerName - The credential issuer name
+   * @return {[]} - Empty tuple
+   */
+  export circuit addAuthorizedIssuer(issuerName: Opaque<"string">): [] {
+    Initializable_assertInitialized();
+
+    const caller = left<ZswapCoinPublicKey, ContractAddress>(ownPublicKey());
+    assert(disclose(caller) == _admin, "DataVerification: admin only");
+
+    assert(issuerName != "", "DataVerification: empty issuer name");
+
+    _authorizedIssuers.insert(disclose(issuerName), true);
+  }
+
+  /**
+   * @description Remove authorized credential issuer (admin only)
+   *
+   * @circuitInfo k=10, rows=300
+   *
+   * Requirements:
+   * - Contract is initialized
+   * - Caller must be admin
+   *
+   * @param {Opaque<"string">} issuerName - The credential issuer name
+   * @return {[]} - Empty tuple
+   */
+  export circuit removeAuthorizedIssuer(issuerName: Opaque<"string">): [] {
+    Initializable_assertInitialized();
+
+    const caller = left<ZswapCoinPublicKey, ContractAddress>(ownPublicKey());
+    assert(disclose(caller) == _admin, "DataVerification: admin only");
+
+    _authorizedIssuers.insert(disclose(issuerName), false);
+  }
+
+  /**
+   * @description Submit medical credential for verification
+   *
+   * @circuitInfo k=12, rows=800
+   *
+   * Requirements:
+   * - Contract is initialized
+   * - Issuer must be authorized
+   * - Valid ZK proof provided
+   * - Credential not expired
+   *
+   * @param {Types_CredentialType} credentialType - Type of medical credential
+   * @param {Opaque<"string">} issuer - Credential issuing authority
+   * @param {Uint<128>} zkProofHash - Zero-knowledge proof hash
+   * @param {Uint<64>} issuedAt - Timestamp when credential was issued
+   * @param {Uint<64>} expiresAt - Timestamp when credential expires
+   * @param {ZKProofParams} proofParams - ZK proof parameters for verification
+   * @return {Uint<128>} - The assigned credential ID
+   */
+  export circuit submitCredential(
+    credentialType: Types_CredentialType,
+    issuer: Opaque<"string">,
+    zkProofHash: Uint<128>,
+    issuedAt: Uint<64>,
+    expiresAt: Uint<64>,
+    proofParams: ZKProofParams
+  ): Uint<128> {
+    Initializable_assertInitialized();
+
+    const caller = left<ZswapCoinPublicKey, ContractAddress>(ownPublicKey());
+
+    // Verify issuer is authorized
+    assert(_authorizedIssuers.member(disclose(issuer)) && _authorizedIssuers.lookup(issuer),
+           "DataVerification: unauthorized issuer");
+
+    // Validate timestamps
+    const currentTime = 1000000; // TODO: Replace with actual timestamp when available
+    assert(issuedAt <= currentTime, "DataVerification: invalid issued time");
+    assert(expiresAt > currentTime, "DataVerification: credential expired");
+    assert(zkProofHash > 0, "DataVerification: invalid proof hash");
+
+    // Verify ZK proof (simplified verification)
+    const isProofValid = verifyZKProof(proofParams);
+    assert(isProofValid, "DataVerification: invalid proof");
+
+    const credentialId = _nextCredentialId;
+
+    // Create medical credential
+    const credential = Types_MedicalCredential {
+      credentialId: credentialId,
+      holder: caller,
+      credentialType: credentialType,
+      issuer: disclose(issuer),
+      zkProofHash: zkProofHash,
+      issuedAt: issuedAt,
+      expiresAt: expiresAt,
+      isValid: true
+    };
+
+    // Store credential
+    _credentials.insert(disclose(credentialId), disclose(credential));
+
+    // Track verified proof
+    _verifiedProofs.insert(disclose(zkProofHash), true);
+
+    // Store proof metadata
+    const proofMetadata = ProofMetadata {
+      proofHash: zkProofHash,
+      verifier: caller,
+      verifiedAt: currentTime,
+      expiresAt: expiresAt,
+      isValid: true
+    };
+    _proofMetadata.insert(disclose(zkProofHash), disclose(proofMetadata));
+
+    // Add to holder's credentials
+    if (!_holderCredentials.member(disclose(caller))) {
+      _holderCredentials.insert(disclose(caller), default<Vector<50, Uint<128>>>);
+    }
+
+    // Add credential ID to holder's list (simplified vector management)
+    // In real implementation: proper vector management needed
+
+    // Increment next credential ID
+    _nextCredentialId = _nextCredentialId + 1;
+
+    return credentialId;
+  }
+
+  /**
+   * @description Verify ZK proof parameters (simplified implementation)
+   *
+   * @circuitInfo k=11, rows=600
+   *
+   * @param {ZKProofParams} params - ZK proof parameters
+   * @return {Boolean} - Verification result
+   */
+  circuit verifyZKProof(params: ZKProofParams): Boolean {
+    // Simplified ZK proof verification
+    // In a real implementation, this would use proper ZK proof libraries
+
+    // Basic validation checks
+    assert(params.commitment > 0, "DataVerification: invalid commitment");
+    assert(params.nullifier > 0, "DataVerification: invalid nullifier");
+
+    // Verify proof structure (simplified)
+    const proofSum = params.proof[0] + params.proof[1] + params.proof[2] + params.proof[3] +
+                     params.proof[4] + params.proof[5] + params.proof[6] + params.proof[7];
+
+    // Simple validation: proof elements should not all be zero
+    assert(proofSum > 0, "DataVerification: empty proof");
+
+    // In real implementation:
+    // - Verify proof against public parameters
+    // - Check commitment scheme integrity
+    // - Validate nullifier uniqueness
+    // - Verify proof of knowledge
+
+    return true;
+  }
+
+  /**
+   * @description Generate ZK proof for selective disclosure
+   *
+   * @circuitInfo k=12, rows=900
+   *
+   * Requirements:
+   * - Contract is initialized
+   * - Caller must have valid credentials
+   * - Data commitment must exist
+   *
+   * @param {Uint<128>} patientId - Patient ID for data disclosure
+   * @param {SelectiveDisclosureParams} disclosureParams - Selective disclosure parameters
+   * @return {Uint<128>} - Proof hash for verification
+   */
+  export circuit generateSelectiveDisclosureProof(
+    patientId: Uint<128>,
+    disclosureParams: SelectiveDisclosureParams
+  ): Uint<128> {
+    Initializable_assertInitialized();
+
+    const caller = left<ZswapCoinPublicKey, ContractAddress>(ownPublicKey());
+
+    // Verify caller has necessary credentials for this data type
+    // In real implementation: check credential requirements
+
+    // Verify data commitment exists
+    assert(_dataCommitments.member(disclose(patientId)), "DataVerification: no data commitments");
+    assert(_dataCommitments.lookup(patientId).member(disclose(disclosureParams.dataCategory)),
+           "DataVerification: data category not committed");
+
+    const storedCommitment = _dataCommitments.lookup(patientId).lookup(disclosureParams.dataCategory);
+    assert(storedCommitment == disclosureParams.commitment, "DataVerification: commitment mismatch");
+
+    // Verify selective disclosure proof (simplified)
+    const isValidDisclosure = verifySelectiveDisclosureProof(disclosureParams);
+    assert(isValidDisclosure, "DataVerification: invalid disclosure proof");
+
+    const currentTime = 1000000; // TODO: Replace with actual timestamp when available
+    const proofHash = disclosureParams.commitment + disclosureParams.nullifierHash + currentTime;
+
+    // Store proof verification result
+    _verifiedProofs.insert(disclose(proofHash), true);
+
+    // Store proof metadata
+    const proofMetadata = ProofMetadata {
+      proofHash: proofHash,
+      verifier: caller,
+      verifiedAt: currentTime,
+      expiresAt: currentTime + 86400, // 24 hours validity
+      isValid: true
+    };
+    _proofMetadata.insert(disclose(proofHash), disclose(proofMetadata));
+
+    return proofHash;
+  }
+
+  /**
+   * @description Verify selective disclosure proof (simplified implementation)
+   *
+   * @circuitInfo k=11, rows=500
+   *
+   * @param {SelectiveDisclosureParams} params - Selective disclosure parameters
+   * @return {Boolean} - Verification result
+   */
+  circuit verifySelectiveDisclosureProof(params: SelectiveDisclosureParams): Boolean {
+    // Simplified selective disclosure verification
+    // In a real implementation, this would use proper cryptographic libraries
+
+    // Basic validation
+    assert(params.commitment > 0, "DataVerification: invalid commitment");
+    assert(params.nullifierHash > 0, "DataVerification: invalid nullifier");
+
+    // Verify proof structure
+    const proofSum = params.proof[0] + params.proof[1] + params.proof[2] + params.proof[3] +
+                     params.proof[4] + params.proof[5] + params.proof[6] + params.proof[7];
+
+    assert(proofSum > 0, "DataVerification: empty proof");
+
+    // In real implementation:
+    // - Verify commitment opens to disclosed value
+    // - Check nullifier prevents double-spending
+    // - Validate range proofs for data values
+    // - Verify zero-knowledge property maintained
+
+    return true;
+  }
+
+  /**
+   * @description Store data commitment for future selective disclosure
+   *
+   * @circuitInfo k=11, rows=400
+   *
+   * Requirements:
+   * - Contract is initialized
+   * - Patient must exist
+   * - Valid commitment provided
+   *
+   * @param {Uint<128>} patientId - Patient ID
+   * @param {Types_HealthDataCategory} dataCategory - Health data category
+   * @param {Uint<128>} commitment - Cryptographic commitment to data
+   * @return {[]} - Empty tuple
+   */
+  export circuit storeDataCommitment(
+    patientId: Uint<128>,
+    dataCategory: Types_HealthDataCategory,
+    commitment: Uint<128>
+  ): [] {
+    Initializable_assertInitialized();
+
+    // Verify patient exists (simplified - would call PatientRegistry)
+    assert(patientId > 0, "DataVerification: invalid patient ID");
+    assert(commitment > 0, "DataVerification: invalid commitment");
+
+    // Initialize patient commitments if not exists
+    if (!_dataCommitments.member(disclose(patientId))) {
+      _dataCommitments.insert(disclose(patientId), default<Map<Types_HealthDataCategory, Uint<128>>>);
+    }
+
+    // Store commitment
+    _dataCommitments.lookup(patientId).insert(disclose(dataCategory), disclose(commitment));
+  }
+
+  /**
+   * @description Verify credential validity
+   *
+   * @circuitInfo k=10, rows=400
+   *
+   * Requirements:
+   * - Contract is initialized
+   * - Credential must exist
+   *
+   * @param {Uint<128>} credentialId - The credential ID
+   * @return {Boolean} - Validity status
+   */
+  export circuit verifyCredential(credentialId: Uint<128>): Boolean {
+    Initializable_assertInitialized();
+
+    if (!_credentials.member(disclose(credentialId))) {
+      return false;
+    }
+
+    const credential = _credentials.lookup(credentialId);
+    const currentTime = 1000000; // TODO: Replace with actual timestamp when available
+
+    // Check if credential is active and not expired
+    return credential.isValid && credential.expiresAt > currentTime;
+  }
+
+  /**
+   * @description Verify ZK proof hash
+   *
+   * @circuitInfo k=10, rows=300
+   *
+   * Requirements:
+   * - Contract is initialized
+   *
+   * @param {Uint<128>} proofHash - The proof hash to verify
+   * @return {Boolean} - Verification status
+   */
+  export circuit verifyProofHash(proofHash: Uint<128>): Boolean {
+    Initializable_assertInitialized();
+
+    if (!_verifiedProofs.member(disclose(proofHash))) {
+      return false;
+    }
+
+    const isVerified = _verifiedProofs.lookup(proofHash);
+
+    // Check if proof metadata exists and is still valid
+    if (_proofMetadata.member(disclose(proofHash))) {
+      const metadata = _proofMetadata.lookup(proofHash);
+      const currentTime = 1000000; // TODO: Replace with actual timestamp when available
+
+      return isVerified && metadata.isValid && metadata.expiresAt > currentTime;
+    }
+
+    return isVerified;
+  }
+
+  /**
+   * @description Get credential details
+   *
+   * @circuitInfo k=10, rows=300
+   *
+   * Requirements:
+   * - Contract is initialized
+   * - Credential must exist
+   *
+   * @param {Uint<128>} credentialId - The credential ID
+   * @return {Types_MedicalCredential} - The medical credential
+   */
+  export circuit getCredential(credentialId: Uint<128>): Types_MedicalCredential {
+    Initializable_assertInitialized();
+
+    assert(_credentials.member(disclose(credentialId)), "DataVerification: credential not found");
+
+    return _credentials.lookup(credentialId);
+  }
+
+  /**
+   * @description Revoke credential (admin or holder only)
+   *
+   * @circuitInfo k=10, rows=400
+   *
+   * Requirements:
+   * - Contract is initialized
+   * - Credential must exist
+   * - Caller must be admin or credential holder
+   *
+   * @param {Uint<128>} credentialId - The credential ID
+   * @return {[]} - Empty tuple
+   */
+  export circuit revokeCredential(credentialId: Uint<128>): [] {
+    Initializable_assertInitialized();
+
+    const caller = left<ZswapCoinPublicKey, ContractAddress>(ownPublicKey());
+
+    assert(_credentials.member(disclose(credentialId)), "DataVerification: credential not found");
+    const credential = _credentials.lookup(credentialId);
+
+    // Verify authorization
+    assert(disclose(caller) == _admin || disclose(caller) == credential.holder,
+           "DataVerification: unauthorized");
+
+    // Revoke credential
+    const revokedCredential = Types_MedicalCredential {
+      credentialId: credential.credentialId,
+      holder: credential.holder,
+      credentialType: credential.credentialType,
+      issuer: credential.issuer,
+      zkProofHash: credential.zkProofHash,
+      issuedAt: credential.issuedAt,
+      expiresAt: credential.expiresAt,
+      isValid: false
+    };
+
+    _credentials.insert(disclose(credentialId), disclose(revokedCredential));
+
+    // Revoke associated proof
+    _verifiedProofs.insert(disclose(credential.zkProofHash), false);
+
+    // Update proof metadata
+    if (_proofMetadata.member(disclose(credential.zkProofHash))) {
+      const existingMetadata = _proofMetadata.lookup(credential.zkProofHash);
+      const updatedMetadata = ProofMetadata {
+        proofHash: existingMetadata.proofHash,
+        verifier: existingMetadata.verifier,
+        verifiedAt: existingMetadata.verifiedAt,
+        expiresAt: existingMetadata.expiresAt,
+        isValid: false
+      };
+      _proofMetadata.insert(disclose(credential.zkProofHash), disclose(updatedMetadata));
+    }
+  }
+
+  /**
+   * @description Batch verify multiple credentials
+   *
+   * @circuitInfo k=11, rows=600
+   *
+   * Requirements:
+   * - Contract is initialized
+   *
+   * @param {Vector<10, Uint<128>>} credentialIds - Array of credential IDs
+   * @return {Vector<10, Boolean>} - Array of verification results
+   */
+  export circuit batchVerifyCredentials(credentialIds: Vector<10, Uint<128>>): Vector<10, Boolean> {
+    Initializable_assertInitialized();
+
+    const currentTime = 1000000; // TODO: Replace with actual timestamp when available
+
+    // Create result vector
+    let results = Vector<10, Boolean>([false; 10]);
+
+    // Verify each credential (simplified loop)
+    for i in 0..10 {
+      const credentialId = credentialIds[i];
+      if (credentialId > 0 && _credentials.member(disclose(credentialId))) {
+        const credential = _credentials.lookup(credentialId);
+        results[i] = credential.isValid && credential.expiresAt > currentTime;
+      }
+    }
+
+    return results;
+  }
+
+  /**
+   * @description Check if issuer is authorized
+   *
+   * @circuitInfo k=10, rows=200
+   *
+   * Requirements:
+   * - Contract is initialized
+   *
+   * @param {Opaque<"string">} issuerName - The issuer name
+   * @return {Boolean} - Authorization status
+   */
+  export circuit isAuthorizedIssuer(issuerName: Opaque<"string">): Boolean {
+    Initializable_assertInitialized();
+
+    if (!_authorizedIssuers.member(disclose(issuerName))) {
+      return false;
+    }
+
+    return _authorizedIssuers.lookup(issuerName);
+  }
+}
