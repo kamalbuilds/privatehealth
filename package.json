@@ -1,0 +1,72 @@
+{
+  "name": "medivault-dapp",
+  "version": "1.0.0",
+  "description": "MediVault - Privacy-Preserving Healthcare Data Marketplace on Midnight Network",
+  "private": true,
+  "type": "module",
+  "author": "MediVault Team",
+  "license": "MIT",
+  "homepage": "https://medivault.io",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/medivault/medivault-dapp.git"
+  },
+  "scripts": {
+    "dev": "node scripts/auto-generator.js",
+    "build": "npm run build:contract && npm run build:frontend",
+    "build:contract": "cd boilerplate/contract && npm run build",
+    "build:frontend": "cd frontend && npm run build",
+    "test": "npm run test:contract && npm run test:frontend",
+    "test:contract": "cd tests && npm test",
+    "test:frontend": "cd frontend && npm test",
+    "generate-key": "node scripts/generate-key.js",
+    "faucet": "node scripts/request-faucet.js",
+    "check-balance": "node scripts/check-balance.js",
+    "balance": "node scripts/check-balance.js",
+    "deploy": "node scripts/deploy.js",
+    "deploy:new": "node scripts/deploy.js --new",
+    "deploy:join": "node scripts/deploy.js --join",
+    "setup": "npm run generate-key && npm run faucet",
+    "testnet-remote": "cd boilerplate/contract-cli && npm run testnet-remote",
+    "wallet": "cd boilerplate/contract-cli && npm run wallet",
+    "clean": "rm -rf boilerplate/contract/dist boilerplate/contract-cli/dist frontend/build",
+    "install:deps": "npm install && cd boilerplate/contract && npm install && cd ../contract-cli && npm install",
+    "lint": "eslint . --ext .ts,.tsx,.js,.jsx",
+    "format": "prettier --write \"**/*.{js,jsx,ts,tsx,json,md,compact}\""
+  },
+  "dependencies": {
+    "@midnight-ntwrk/compact-runtime": "latest",
+    "@midnight-ntwrk/ledger": "^4.0.0",
+    "@midnight-ntwrk/midnight-js-network-id": "^2.0.2",
+    "@midnight-ntwrk/wallet": "^5.0.0",
+    "dotenv": "^16.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "@typescript-eslint/eslint-plugin": "^6.13.0",
+    "@typescript-eslint/parser": "^6.13.0",
+    "eslint": "^8.54.0",
+    "eslint-config-prettier": "^9.0.0",
+    "prettier": "^3.1.0",
+    "typescript": "^5.3.2",
+    "vitest": "^1.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0",
+    "npm": ">=9.0.0"
+  },
+  "keywords": [
+    "midnight",
+    "blockchain",
+    "privacy",
+    "healthcare",
+    "zero-knowledge",
+    "medical-data",
+    "selective-disclosure",
+    "zkp",
+    "compact",
+    "medivault",
+    "hipaa",
+    "gdpr"
+  ]
+}
